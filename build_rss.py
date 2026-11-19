@@ -4,20 +4,14 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from feedgen.feed import FeedGenerator
+from playwright.sync_api import sync_playwright
 
 LIST_URL = "https://www.npic.ac.cn/hdly/jyzp/yjszs/index.html"
 RSS_FILE = "rss.xml"
 TZ_CN = timezone(timedelta(hours=8))
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-}
 
 
 def load_existing_dates(filepath: str) -> dict[str, datetime]:
@@ -44,14 +38,26 @@ def extract_date(text: str) -> datetime | None:
     return None
 
 
+def fetch_html_with_browser(url: str) -> str:
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            locale="zh-CN",
+        )
+        page = context.new_page()
+        page.goto(url, wait_until="networkidle", timeout=45000)
+        page.wait_for_timeout(2000)
+        html = page.content()
+        browser.close()
+        return html
+
+
 def main():
     existing_dates = load_existing_dates(RSS_FILE)
+    html = fetch_html_with_browser(LIST_URL)
 
-    resp = requests.get(LIST_URL, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    resp.encoding = resp.apparent_encoding or "utf-8"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
 
     items_data = []
     seen_links = set()
@@ -84,13 +90,13 @@ def main():
         })
 
     if not items_data:
-        raise RuntimeError("未抓取到任何有效文章链接，请检查网页结构或访问连通性。")
+        raise RuntimeError("未抓取到任何有效文章链接，请检查网页结构。")
 
     fg = FeedGenerator()
     fg.id(LIST_URL)
     fg.title("中国核动力研究设计院 - 研究生招生公告")
     fg.link(href=LIST_URL, rel="alternate")
-    fg.description("自动追踪中国核动力研究设计院研究生招生栏目更新")
+    fg.description("自动追踪中国核动力研究设计院“研究生招生”栏目全部公告更新")
     fg.language("zh-CN")
 
     for entry in items_data[:30]:
