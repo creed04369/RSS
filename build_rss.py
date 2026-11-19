@@ -38,7 +38,9 @@ def extract_date(text: str) -> datetime | None:
     return None
 
 
-def fetch_html_with_browser(url: str) -> str:
+def fetch_all_frames_html(url: str) -> list[tuple[str, str]]:
+    """获取主页面以及所有 iframe 子页面的 HTML"""
+    results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -47,50 +49,67 @@ def fetch_html_with_browser(url: str) -> str:
         )
         page = context.new_page()
         page.goto(url, wait_until="networkidle", timeout=45000)
-        page.wait_for_timeout(2000)
-        html = page.content()
+        page.wait_for_timeout(3000)
+
+        print("页面标题:", page.title())
+        for frame in page.frames:
+            try:
+                results.append((frame.url or url, frame.content()))
+            except Exception:
+                pass
         browser.close()
-        return html
+    return results
 
 
 def main():
     existing_dates = load_existing_dates(RSS_FILE)
-    html = fetch_html_with_browser(LIST_URL)
-
-    soup = BeautifulSoup(html, "html.parser")
+    frames_html = fetch_all_frames_html(LIST_URL)
 
     items_data = []
     seen_links = set()
+    sample_links = []
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        title = a.get_text(" ", strip=True)
-        if not title or len(title) < 4:
-            continue
+    for base_url, html in frames_html:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            title = a.get("title") or a.get_text(" ", strip=True)
+            title = " ".join(title.split())
+            if not title or len(title) < 6:
+                continue
 
-        full_url = urljoin(LIST_URL, href)
-        path = urlparse(full_url).path
-        filename = os.path.basename(path)
+            full_url = urljoin(base_url, href)
+            parsed = urlparse(full_url)
+            if "npic.ac.cn" not in parsed.netloc:
+                continue
 
-        if "/hdly/jyzp/yjszs/" not in path or not filename.endswith(".html"):
-            continue
-        if filename.startswith("index"):
-            continue
-        if full_url in seen_links:
-            continue
-        seen_links.add(full_url)
+            path = parsed.path
+            filename = os.path.basename(path)
+            sample_links.append(f"{title} -> {full_url}")
 
-        parent_text = a.parent.get_text(" ", strip=True) if a.parent else title
-        pub_date = extract_date(parent_text) or existing_dates.get(full_url) or datetime.now(TZ_CN)
+            # 排除首页、栏目列表页及翻页链接，保留具体文章详情页
+            if not filename or filename.startswith("index"):
+                continue
+            if not any(filename.endswith(ext) for ext in (".html", ".htm", ".shtml", ".jsp", ".aspx")):
+                continue
+            if full_url in seen_links:
+                continue
+            seen_links.add(full_url)
 
-        items_data.append({
-            "title": title,
-            "link": full_url,
-            "pubDate": pub_date,
-        })
+            parent_text = a.parent.get_text(" ", strip=True) if a.parent else title
+            pub_date = extract_date(parent_text) or existing_dates.get(full_url) or datetime.now(TZ_CN)
+
+            items_data.append({
+                "title": title,
+                "link": full_url,
+                "pubDate": pub_date,
+            })
 
     if not items_data:
-        raise RuntimeError("未抓取到任何有效文章链接，请检查网页结构。")
+        print("调试样例链接（前15条）:")
+        for s in sample_links[:15]:
+            print("  ", s)
+        raise RuntimeError("未抓取到任何有效文章链接，请查看上方日志中的页面标题与样例链接。")
 
     fg = FeedGenerator()
     fg.id(LIST_URL)
